@@ -1,6 +1,11 @@
 package dev.sentinel.ui
 
+import android.app.Activity
 import android.content.Intent
+import android.net.VpnService
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import dev.sentinel.firewall.Firewall
 import android.net.Uri
 import android.provider.Settings
 import androidx.compose.foundation.layout.*
@@ -16,6 +21,9 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import dev.sentinel.audit.AppRisk
 import dev.sentinel.audit.PermissionAuditor
 import dev.sentinel.audit.Risk
+import dev.sentinel.integrity.Check
+import dev.sentinel.integrity.DeviceIntegrity
+import dev.sentinel.integrity.Status
 import dev.sentinel.scam.Level
 import dev.sentinel.scam.ScamAnalyzer
 import kotlinx.coroutines.Dispatchers
@@ -31,11 +39,12 @@ fun SentinelApp(sharedText: String?) {
             NavigationBar {
                 NavigationBarItem(tab == 0, { tab = 0 }, icon = { Text("🔐") }, label = { Text("Permissions") })
                 NavigationBarItem(tab == 1, { tab = 1 }, icon = { Text("🎣") }, label = { Text("Scam check") })
+                NavigationBarItem(tab == 2, { tab = 2 }, icon = { Text("🛡") }, label = { Text("Device") })
             }
         },
     ) { pad ->
         Box(Modifier.padding(pad).fillMaxSize()) {
-            if (tab == 0) PermissionsScreen() else ScamScreen(sharedText)
+            when (tab) { 0 -> PermissionsScreen(); 1 -> ScamScreen(sharedText); else -> DeviceScreen() }
         }
     }
 }
@@ -55,6 +64,19 @@ private fun PermissionsScreen() {
     var apps by remember { mutableStateOf<List<AppRisk>?>(null) }
     var usageOk by remember { mutableStateOf(true) }
     var tick by remember { mutableIntStateOf(0) }
+    var blocked by remember { mutableStateOf(Firewall.blocked(ctx)) }
+    var pendingPkg by remember { mutableStateOf<String?>(null) }
+    var queueOn by remember { mutableStateOf(false) }
+    var skipped by remember { mutableStateOf(setOf<String>()) }
+
+    // One-time Android consent dialog for the local VPN the firewall uses.
+    val vpnLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+        val pkg = pendingPkg
+        if (r.resultCode == Activity.RESULT_OK && pkg != null) {
+            Firewall.set(ctx, pkg, true); blocked = Firewall.blocked(ctx); Firewall.apply(ctx)
+        }
+        pendingPkg = null
+    }
     LifecycleResumeEffect(Unit) { tick++; onPauseOrDispose { } }
     LaunchedEffect(tick) {
         val auditor = PermissionAuditor(ctx)
@@ -62,19 +84,44 @@ private fun PermissionsScreen() {
         apps = withContext(Dispatchers.Default) { auditor.audit() }
     }
 
+    fun toggle(pkg: String) {
+        if (pkg in blocked) {
+            Firewall.set(ctx, pkg, false)
+        } else {
+            val consent = VpnService.prepare(ctx)
+            if (consent != null) { pendingPkg = pkg; vpnLauncher.launch(consent); return }
+            Firewall.set(ctx, pkg, true)
+        }
+        blocked = Firewall.blocked(ctx); Firewall.apply(ctx)
+    }
+
     val list = apps
     if (list == null) { Box(Modifier.fillMaxSize()) { CircularProgressIndicator(Modifier.padding(32.dp)) }; return }
+
+    val queue = list.filter { it.score >= 4 && it.pkg !in skipped }
+    if (queueOn) {
+        val cur = queue.firstOrNull()
+        FixQueue(
+            app = cur, remaining = queue.size, isBlocked = cur != null && cur.pkg in blocked,
+            onToggle = { cur?.let { toggle(it.pkg) } },
+            onSkip = { cur?.let { skipped = skipped + it.pkg } },
+            onExit = { queueOn = false; skipped = emptySet() },
+        )
+        return
+    }
 
     LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
             val top = list.firstOrNull()
             ElevatedCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Top fix", style = MaterialTheme.typography.labelLarge)
                     Text(
                         if (top == null) "No risky apps found 🎉" else "${top.label}: ${top.reasons.first()}",
                         style = MaterialTheme.typography.titleMedium,
                     )
+                    if (queue.isNotEmpty()) Button({ queueOn = true }) { Text("Start Fix Queue (${queue.size} apps)") }
+                    if (blocked.isNotEmpty()) Text("🔥 ${blocked.size} app(s) blocked from the internet", style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
@@ -94,16 +141,55 @@ private fun PermissionsScreen() {
                     app.reasons.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) }
                     Row {
                         TextButton({
-                            ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${app.pkg}")))
-                        }) { Text("Review permissions") }
+                            runCatching { ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${app.pkg}"))) }
+                        }) { Text("Permissions") }
+                        TextButton({ toggle(app.pkg) }) { Text(if (app.pkg in blocked) "Unblock net" else "Block net") }
                         TextButton({
-                            ctx.startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:${app.pkg}")))
+                            runCatching { ctx.startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:${app.pkg}"))) }
                         }) { Text("Uninstall") }
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun FixQueue(
+    app: AppRisk?, remaining: Int, isBlocked: Boolean,
+    onToggle: () -> Unit, onSkip: () -> Unit, onExit: () -> Unit,
+) {
+    val ctx = LocalContext.current
+    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (app == null) {
+            Text("Queue finished 🎉", style = MaterialTheme.typography.headlineSmall)
+            Button(onExit) { Text("Done") }
+            return@Column
+        }
+        Text("Fix Queue · $remaining left", style = MaterialTheme.typography.labelLarge)
+        ElevatedCard(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(app.label, style = MaterialTheme.typography.titleLarge)
+                app.reasons.forEach { Text("• $it", style = MaterialTheme.typography.bodyMedium) }
+            }
+        }
+        Button({
+            runCatching { ctx.startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:${app.pkg}"))) }
+        }, Modifier.fillMaxWidth()) { Text("Uninstall") }
+        OutlinedButton(onToggle, Modifier.fillMaxWidth()) { Text(if (isBlocked) "Unblock its internet" else "Block its internet (keep the app)") }
+        OutlinedButton({
+            runCatching { ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${app.pkg}"))) }
+        }, Modifier.fillMaxWidth()) { Text("Review permissions") }
+        TextButton(onSkip) { Text("Keep it, next app") }
+        TextButton(onExit) { Text("Exit queue") }
+    }
+}
+
+private fun fixIntent(c: Check): Intent? = when {
+    c.title.startsWith("Debugging") || c.title.startsWith("Developer") -> Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
+    c.title.startsWith("Screen lock") || c.title.startsWith("Storage") -> Intent(Settings.ACTION_SECURITY_SETTINGS)
+    c.title.startsWith("Security patch") -> Intent("android.settings.SYSTEM_UPDATE_SETTINGS")
+    else -> null
 }
 
 @Composable
@@ -145,6 +231,50 @@ private fun ScamScreen(initial: String?) {
                     Column(Modifier.padding(16.dp)) {
                         Text(f.title, style = MaterialTheme.typography.titleSmall)
                         Text(f.why, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeviceScreen() {
+    val ctx = LocalContext.current
+    var checks by remember { mutableStateOf<List<Check>?>(null) }
+    LaunchedEffect(Unit) { checks = withContext(Dispatchers.Default) { DeviceIntegrity(ctx).run() } }
+
+    val list = checks
+    if (list == null) { Box(Modifier.fillMaxSize()) { CircularProgressIndicator(Modifier.padding(32.dp)) }; return }
+
+    val bad = list.count { it.status == Status.BAD }
+    val warn = list.count { it.status == Status.WARN }
+    LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item {
+            ElevatedCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text(
+                        if (bad == 0 && warn == 0) "Device looks healthy" else "$bad critical, $warn warnings",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = if (bad > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                    )
+                    Text("Checks hardware-attested boot state, patch level, lock, encryption and tamper signs. All on-device.", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+        items(list.sortedBy { it.status.ordinal.let { o -> if (o == Status.INFO.ordinal) 9 else 3 - o } }) { c ->
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    val (mark, color) = when (c.status) {
+                        Status.OK -> "✓" to MaterialTheme.colorScheme.primary
+                        Status.WARN -> "⚠" to MaterialTheme.colorScheme.tertiary
+                        Status.BAD -> "✕" to MaterialTheme.colorScheme.error
+                        Status.INFO -> "ⓘ" to MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                    Text("$mark  ${c.title}", style = MaterialTheme.typography.titleSmall, color = color)
+                    Text(c.detail, style = MaterialTheme.typography.bodySmall)
+                    if (c.status == Status.BAD || c.status == Status.WARN) fixIntent(c)?.let { i ->
+                        TextButton({ runCatching { ctx.startActivity(i) } }) { Text("Open fix") }
                     }
                 }
             }

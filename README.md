@@ -9,6 +9,12 @@ Open-source, **100% on-device** Android security helper with two tools:
    language: look-alike brand domains, homograph/punycode, shorteners, `user@host` tricks, urgency,
    gift-card/crypto payment, OTP/credential requests, secrecy, family impersonation, remote-access bait.
 
+3. **Firewall + Fix Queue** – block any app's internet with one tap (a local black-hole VPN: only
+   chosen apps are routed into it and every packet is dropped, so Sentinel still needs no INTERNET
+   permission). The Fix Queue walks you through uninstalling, blocking or restricting each risky app.
+4. **Device integrity** – hardware key attestation (verified boot, bootloader, patch level), lock,
+   encryption, debugging, root/tamper signs, with shortcuts to the matching settings screens.
+
 ## Security design
 - **No `INTERNET` permission** – verifiable in the manifest; nothing can be exfiltrated.
 - `FLAG_SECURE` (no screenshots / recents thumbnail), `allowBackup=false`, cleartext disabled.
