@@ -6,6 +6,9 @@ import android.net.VpnService
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import dev.sentinel.firewall.Firewall
+import dev.sentinel.sensors.SensorLog
+import dev.sentinel.sensors.SensorWatchService
+import androidx.core.content.ContextCompat
 import android.net.Uri
 import android.provider.Settings
 import androidx.compose.foundation.layout.*
@@ -40,11 +43,12 @@ fun SentinelApp(sharedText: String?) {
                 NavigationBarItem(tab == 0, { tab = 0 }, icon = { Text("🔐") }, label = { Text("Permissions") })
                 NavigationBarItem(tab == 1, { tab = 1 }, icon = { Text("🎣") }, label = { Text("Scam check") })
                 NavigationBarItem(tab == 2, { tab = 2 }, icon = { Text("🛡") }, label = { Text("Device") })
+                NavigationBarItem(tab == 3, { tab = 3 }, icon = { Text("🎙") }, label = { Text("Sensors") })
             }
         },
     ) { pad ->
         Box(Modifier.padding(pad).fillMaxSize()) {
-            when (tab) { 0 -> PermissionsScreen(); 1 -> ScamScreen(sharedText); else -> DeviceScreen() }
+            when (tab) { 0 -> PermissionsScreen(); 1 -> ScamScreen(sharedText); 2 -> DeviceScreen(); else -> SensorScreen() }
         }
     }
 }
@@ -279,5 +283,52 @@ private fun DeviceScreen() {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SensorScreen() {
+    val ctx = LocalContext.current
+    val running = SensorLog.running
+    var usageOk by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) { SensorLog.init(ctx) }
+    LifecycleResumeEffect(Unit) { usageOk = PermissionAuditor(ctx).hasUsageAccess(); onPauseOrDispose { } }
+
+    fun startWatch() { ContextCompat.startForegroundService(ctx, Intent(ctx, SensorWatchService::class.java)) }
+    val notifLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { startWatch() }
+    val notifOk = ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.POST_NOTIFICATIONS) ==
+        android.content.pm.PackageManager.PERMISSION_GRANTED
+
+    LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item {
+            ElevatedCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(if (running) "Watching camera & microphone" else "Monitoring is off", style = MaterialTheme.typography.titleLarge)
+                    Text("Detects when ANYTHING on the phone opens the camera or records audio: user apps, hidden apps and system services. Alerts you if it happens while your screen is off.", style = MaterialTheme.typography.bodySmall)
+                    if (running) Button({ ctx.stopService(Intent(ctx, SensorWatchService::class.java)) }) { Text("Stop monitoring") }
+                    else Button({ if (notifOk) startWatch() else notifLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS) }) { Text("Start monitoring") }
+                    if (!notifOk) Text("Allow notifications so alerts can reach you.", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+        if (!usageOk) item {
+            OutlinedCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Optional: allow Usage access so Sentinel can name the foreground app when the camera or mic turns on.")
+                    TextButton({ runCatching { ctx.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) } }) { Text("Open settings") }
+                }
+            }
+        }
+        item {
+            OutlinedCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("Android hides which app is responsible from normal apps. To see exactly who, check Android's own Privacy dashboard.", style = MaterialTheme.typography.bodySmall)
+                    TextButton({ runCatching { ctx.startActivity(Intent(Settings.ACTION_PRIVACY_SETTINGS)) } }) { Text("Open Privacy settings") }
+                }
+            }
+        }
+        item { Text("Activity log", style = MaterialTheme.typography.titleMedium) }
+        if (SensorLog.events.isEmpty()) item { Text("Nothing yet.", style = MaterialTheme.typography.bodySmall) }
+        items(SensorLog.events.toList()) { line -> Text(line, style = MaterialTheme.typography.bodySmall) }
     }
 }

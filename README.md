@@ -15,6 +15,9 @@ Open-source, **100% on-device** Android security helper with two tools:
 4. **Device integrity** – hardware key attestation (verified boot, bootloader, patch level), lock,
    encryption, debugging, root/tamper signs, with shortcuts to the matching settings screens.
 
+5. **Sensor watch** – foreground service that detects when anything (apps, hidden apps, system
+   services) opens the camera or records audio, logs it, and alerts if it happens with the screen off.
+
 ## Security design
 - **No `INTERNET` permission** – verifiable in the manifest; nothing can be exfiltrated.
 - `FLAG_SECURE` (no screenshots / recents thumbnail), `allowBackup=false`, cleartext disabled.
