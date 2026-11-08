@@ -13,6 +13,7 @@ import android.content.pm.ServiceInfo
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
 import android.media.AudioRecordingConfiguration
+import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -56,23 +57,35 @@ class SensorWatchService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-        val n = Notification.Builder(this, CH_MON)
-            .setSmallIcon(android.R.drawable.ic_menu_view)
-            .setContentTitle("Sentinel is watching camera & mic")
-            .setContentText("Tap to open")
-            .setContentIntent(open)
-            .setOngoing(true)
-            .build()
-        startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-        if (!registered) {
-            getSystemService(CameraManager::class.java).registerAvailabilityCallback(ContextCompat.getMainExecutor(this), camCb)
-            getSystemService(AudioManager::class.java).registerAudioRecordingCallback(micCb, Handler(Looper.getMainLooper()))
-            registered = true
-            SensorLog.add(this, "Monitoring started")
+        try {
+            val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+            val n = Notification.Builder(this, CH_MON)
+                .setSmallIcon(android.R.drawable.ic_menu_view)
+                .setContentTitle("Sentinel is watching camera & mic")
+                .setContentText("Tap to open")
+                .setContentIntent(open)
+                .setOngoing(true)
+                .build()
+            // The specialUse service type only exists on Android 14+. On 13 it must be omitted.
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            } else {
+                startForeground(1, n)
+            }
+            if (!registered) {
+                getSystemService(CameraManager::class.java).registerAvailabilityCallback(ContextCompat.getMainExecutor(this), camCb)
+                getSystemService(AudioManager::class.java).registerAudioRecordingCallback(micCb, Handler(Looper.getMainLooper()))
+                registered = true
+                SensorLog.add(this, "Monitoring started")
+            }
+            SensorLog.running = true
+            return START_STICKY
+        } catch (e: Exception) {
+            SensorLog.running = false
+            SensorLog.add(this, "Error: ${e.javaClass.simpleName}: ${e.message}")
+            stopSelf()
+            return START_NOT_STICKY
         }
-        SensorLog.running = true
-        return START_STICKY
     }
 
     private fun update(sensor: Sensor, on: Boolean) {
